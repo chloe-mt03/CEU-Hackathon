@@ -1,0 +1,171 @@
+---
+title: "hackathon"
+output: html_document
+date: "2022-11-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#loaded in packages
+library(bayestestR)
+library(broom)
+library(broom.mixed)
+library(ez)
+library(faux)
+library(Hmisc)
+library(irr)
+library(lme4)
+library(lmerTest)
+library(lsr)
+library(mice)
+library(MuMIn)
+library(performance)
+library(pscl)
+library(psych)
+library(pwr)
+library(ResourceSelection)
+library(sjPlot)
+library(tidyverse)
+library(NHANES)
+library(gtools)
+library(knitr)
+library(kableExtra)
+
+#loaded in data sets
+transactions <- read.csv("transactions.csv")
+users <- read.csv("users.csv")
+activity <- read.csv("sdsh2022_sarafu_trainset.csv")
+```
+
+```{r}
+#joined users and activity data sets + removed registration time stamps
+users <- inner_join(users, activity, by="id") %>%
+  separate(registration_time, into=c("reg_date", "reg_time"), sep=" ") %>%
+  select(-reg_time)
+rm(activity)
+
+#removed transaction time stamps
+transactions <- transactions %>%
+  separate(time, into=c("trans_date", "trans_time"), sep=" ") %>%
+  select(-trans_time)
+```
+
+```{r}
+#created spent and received data sets + joined with users data set
+spent <- transactions %>% select(-target) %>% rename(id=source, spent=amount)
+spent <- inner_join(users, spent, by="id")
+
+received <- transactions %>% select(-source) %>% rename(id=target, received=amount)
+received <- inner_join(users, received, by="id")
+```
+
+```{r}
+#created wide and long versions of full data set
+data_wide <- inner_join(spent, received, by=c("id", "account_type", "reg_date", "gender", "area_name", "area_type", "business_type", "start_balance", "inactive", "trans_date"))
+
+data_long <- data_wide %>% gather(type, amount, spent:received)
+rm(spent, received)
+```
+
+```{r}
+#created unique ID
+data_wide <- data_wide %>% group_by(trans_date) %>% mutate(uniqueid=n_distinct(id))
+```
+
+```{r}
+#created numberoftrans variable (number of transactions per day)
+data_wide <- data_wide %>% group_by(trans_date) %>% mutate(numberoftrans=n())
+```
+
+```{r}
+#removed missing data
+data_wide <- data_wide %>% filter(gender!="unknown", area_type!="unknown", business_type!="unknown", area_name!="unknown")
+```
+
+```{r}
+#converted date to date type
+data_wide$reg_date <- as.Date(data_wide$reg_date)
+data_wide$trans_date <- as.Date(data_wide$trans_date)
+```
+
+```{r}
+#visualised distribution of numberoftrans
+ggplot(data_wide, aes(x=numberoftrans)) +
+  geom_histogram() +
+  theme_classic()
+```
+
+```{r}
+#visualised numberoftrans across time
+transT <- data_wide %>% mutate(area_type=recode(area_type, "periurban"="Periurban", "urban"="Urban", "rural"="Rural"))
+ggplot(transT, aes(x=trans_date, y=numberoftrans)) +
+  geom_point(color="darkseagreen4") +
+  geom_smooth(method="lm", color="darkseagreen3") +
+  labs(y="Number of transactions per day") +
+  xlab(" ") +
+  scale_x_discrete(guide = guide_axis(n.dodge=2)) +
+  scale_x_date(date_breaks="1 month", date_labels="%b %Y") +
+  theme_classic()
+ggsave("time.png")
+```
+
+```{r}
+#modeled effect of time on numberoftrans
+data_wide <- data_wide %>% mutate(trans_date=as.numeric(trans_date))
+modAT <- lm(numberoftrans~trans_date+I(trans_date^2), data=data_wide)
+summary(modAT)
+```
+
+```{r}
+#descriptive statistics for numberoftrans per area type
+data_wide %>%
+  group_by(area_type) %>%
+  summarise(mean=mean(numberoftrans), sd=sd(numberoftrans))
+```
+
+```{r}
+#numberoftrans summary per area_name
+transAN <- data_wide %>% group_by(area_name, area_type) %>% summarise(n=n(), mean=mean(numberoftrans), sd=sd(numberoftrans), se=sd/sqrt(n))
+transAN
+transAN <- transAN %>% mutate(area_type=recode(area_type, "periurban"="Periurban", "urban"="Urban", "rural"="Rural"))
+transAN$area_type <- factor(transAN$area_type, levels = c("Urban", "Periurban", "Rural"))
+ggplot(transAN, aes(x=reorder(area_name, -mean), y=mean)) +
+  geom_bar(stat="identity", aes(fill=area_type)) +
+  scale_x_discrete(guide = guide_axis(n.dodge=2)) +
+  scale_fill_brewer(palette="YIGn") +
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se, width=.1)) +
+  labs(x="Area", y="Average number of transactions per day", fill="Area type") +
+  theme_classic()
+ggsave("plot.png")
+```
+
+```{r}
+#numberoftrans summary per business type
+transBT <- data_wide %>% group_by(business_type) %>% summarise(n=n(), mean=mean(numberoftrans), sd=sd(numberoftrans), se=sd/sqrt(n))
+transBT <- transBT %>% mutate(business_type=recode(business_type, "environment"="Environment", "education"="Education", "health"="Health", "water"="Water", "farming"="Farming", "faith"="Faith", "food"="Food", "fuel/energy"="Fuel/energy", "other"="Other", "shop"="Shop", "labour"="Labour", "transport"="Transport", "government"="Government", "savings"="Savings"))
+ggplot(transBT, aes(x=reorder(business_type, -mean), y=mean)) +
+  geom_bar(stat="identity", fill="darkseagreen3") +
+  scale_x_discrete(guide = guide_axis(n.dodge=2)) +
+  geom_errorbar(aes(ymin=mean-se, ymax=mean+se, width=.1)) +
+  labs(x="Business type", y="Average number of transactions per day") +
+  theme_classic()
+ggsave("plot2.png")
+```
+
+```{r}
+#modeled effect of gender, area_type, business_type, and area_name on numberoftrans
+data_wide <- data_wide %>% mutate(gender=recode(gender, "male"=0, "female"=1),
+                                  gender=as.factor(gender),
+                                  area_type=as.factor(area_type),
+                                  business_type=as.factor(business_type))
+
+contrasts(data_wide$area_type)=contr.treatment(3)
+contrasts(data_wide$business_type)=contr.treatment(14)
+
+mod <- aov(numberoftrans~gender+area_type+business_type+area_name, data=data_wide)
+summary(mod)
+```
+
